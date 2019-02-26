@@ -3,15 +3,19 @@ package xmlrpc
 import (
 	"bytes"
 	"crypto/tls"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
+
+	"github.com/mpl/scgiclient"
 
 	"github.com/pkg/errors"
 )
 
 type rpc interface {
-	Call(req io.Reader) (io.ReadCloser, error)
+	Call(req io.Reader) (io.Reader, error)
 }
 
 type httpRPC struct {
@@ -19,12 +23,31 @@ type httpRPC struct {
 	httpClient *http.Client
 }
 
-func (c *httpRPC) Call(req io.Reader) (io.ReadCloser, error) {
+func (c *httpRPC) Call(req io.Reader) (io.Reader, error) {
 	resp, err := c.httpClient.Post(c.addr, "text/xml", req)
 	if err != nil {
 		return nil, errors.Wrap(err, "POST failed")
 	}
-	return resp.Body, nil
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "error reading response")
+	}
+	return bytes.NewBuffer(body), nil
+}
+
+type scgiRPC struct {
+	addr string
+}
+
+func (c *scgiRPC) Call(req io.Reader) (io.Reader, error) {
+	res, err := scgiclient.Send(c.addr, req)
+	if err != nil {
+		fmt.Println("err: ", err)
+		return nil, errors.Wrap(err, "POST failed")
+	}
+	defer res.Close()
+	return bytes.NewBuffer(res.Body), nil
 }
 
 // Client implements a basic XMLRPC client
@@ -44,7 +67,7 @@ func NewClient(addr string, insecure bool) *Client {
 	if url.Scheme == "scgi" {
 		return &Client{
 			addr: addr,
-			rpc:  nil,
+			rpc:  &scgiRPC{addr: fmt.Sprintf("%s:%s", url.Hostname(), url.Port())},
 		}
 	}
 
@@ -88,10 +111,8 @@ func (c *Client) Call(name string, args ...interface{}) (interface{}, error) {
 
 	body, err := c.rpc.Call(req)
 	if err != nil {
-		return nil, errors.Wrap(err, "xml-rpc call failed")
+		return nil, err
 	}
-
-	defer body.Close()
 	_, val, fault, err := Unmarshal(body)
 	if fault != nil {
 		err = errors.Errorf("Error: %v: %v", err, fault)
